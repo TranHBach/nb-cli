@@ -96,13 +96,13 @@ pub fn execute(args: CreateArgs) -> Result<()> {
             let server_root = crate::notebook::remote::resolve_server_root();
             let server_path =
                 crate::notebook::remote::notebook_path_for_server(&path, server_root.as_deref());
-            let client = crate::execution::server::client::JupyterClient::new(
-                server_url.clone(),
-                token.clone(),
-            )?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
+            let client = runtime.block_on(crate::execution::server::client::JupyterClient::new(
+                server_url.clone(),
+                token.clone(),
+            ))?;
             runtime
                 .block_on(client.save_notebook(&server_path, &notebook))
                 .context("Failed to create notebook on server")?;

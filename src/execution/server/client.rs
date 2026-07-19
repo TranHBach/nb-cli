@@ -1,14 +1,21 @@
 //! HTTP client for Jupyter Server REST API
 
 use anyhow::{Context, Result};
+use reqwest::header::{COOKIE, SET_COOKIE};
+use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Jupyter Server REST API client
 pub struct JupyterClient {
     base_url: String,
-    token: String,
+    auth: ServerAuth,
     client: reqwest::Client,
+}
+
+enum ServerAuth {
+    Token(String),
+    Cookie { header: String, xsrf: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,25 +53,43 @@ struct KernelSpec {
 
 impl JupyterClient {
     /// Create a new Jupyter Server client
-    pub fn new(server_url: String, token: String) -> Result<Self> {
+    pub async fn new(server_url: String, credential: String) -> Result<Self> {
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("Failed to create HTTP client")?;
+        let base_url = server_url.trim_end_matches('/').to_string();
+        let auth = if let Some(env_name) = credential.strip_prefix("password-env:") {
+            let password = std::env::var(env_name)
+                .with_context(|| format!("Password environment variable {env_name} is not set"))?;
+            login_with_password(&client, &base_url, &password).await?
+        } else {
+            ServerAuth::Token(credential)
+        };
 
         Ok(Self {
-            base_url: server_url.trim_end_matches('/').to_string(),
-            token,
+            base_url,
+            auth,
             client,
         })
+    }
+
+    fn authenticated(&self, request: RequestBuilder) -> RequestBuilder {
+        match &self.auth {
+            ServerAuth::Token(token) => request.query(&[("token", token)]),
+            ServerAuth::Cookie { header, xsrf } => request.header(COOKIE, header).header("X-XSRFToken", xsrf),
+        }
+    }
+
+    pub fn websocket_cookie(&self) -> Option<&str> {
+        match &self.auth { ServerAuth::Token(_) => None, ServerAuth::Cookie { header, .. } => Some(header) }
     }
 
     /// Test connection to the server
     pub async fn test_connection(&self) -> Result<()> {
         let url = format!("{}/api", self.base_url);
         let response = self
-            .client
-            .get(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.get(&url))
             .send()
             .await
             .context("Failed to connect to Jupyter Server")?;
@@ -83,9 +108,7 @@ impl JupyterClient {
     pub async fn get_kernel(&self, kernel_id: &str) -> Result<KernelInfo> {
         let url = format!("{}/api/kernels/{}", self.base_url, kernel_id);
         let response = self
-            .client
-            .get(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.get(&url))
             .send()
             .await
             .context("Failed to get kernel info")?;
@@ -105,9 +128,7 @@ impl JupyterClient {
     pub async fn list_kernels(&self) -> Result<Vec<KernelInfo>> {
         let url = format!("{}/api/kernels", self.base_url);
         let response = self
-            .client
-            .get(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.get(&url))
             .send()
             .await
             .context("Failed to list kernels")?;
@@ -133,9 +154,7 @@ impl JupyterClient {
         });
 
         let response = self
-            .client
-            .post(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.post(&url))
             .json(&payload)
             .send()
             .await
@@ -157,9 +176,7 @@ impl JupyterClient {
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let url = format!("{}/api/sessions", self.base_url);
         let response = self
-            .client
-            .get(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.get(&url))
             .send()
             .await
             .context("Failed to list sessions")?;
@@ -196,9 +213,7 @@ impl JupyterClient {
         };
 
         let response = self
-            .client
-            .post(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.post(&url))
             .json(&payload)
             .send()
             .await
@@ -240,9 +255,7 @@ impl JupyterClient {
         };
 
         let response = self
-            .client
-            .post(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.post(&url))
             .json(&payload)
             .send()
             .await
@@ -266,9 +279,7 @@ impl JupyterClient {
     pub async fn restart_kernel(&self, kernel_id: &str) -> Result<KernelInfo> {
         let url = format!("{}/api/kernels/{}/restart", self.base_url, kernel_id);
         let response = self
-            .client
-            .post(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.post(&url))
             .send()
             .await
             .context("Failed to restart kernel")?;
@@ -288,9 +299,7 @@ impl JupyterClient {
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let url = format!("{}/api/sessions/{}", self.base_url, session_id);
         let response = self
-            .client
-            .delete(&url)
-            .query(&[("token", &self.token)])
+            .authenticated(self.client.delete(&url))
             .send()
             .await
             .context("Failed to delete session")?;
@@ -323,13 +332,8 @@ impl JupyterClient {
         let url = self.contents_url(path)?;
 
         let response = self
-            .client
-            .get(&url)
-            .query(&[
-                ("token", self.token.as_str()),
-                ("content", "1"),
-                ("type", "notebook"),
-            ])
+            .authenticated(self.client.get(&url))
+            .query(&[("content", "1"), ("type", "notebook")])
             .send()
             .await
             .context("Failed to fetch notebook from server")?;
@@ -365,9 +369,7 @@ impl JupyterClient {
         });
 
         let response = self
-            .client
-            .put(&url)
-            .query(&[("token", self.token.as_str())])
+            .authenticated(self.client.put(&url))
             .json(&payload)
             .send()
             .await
@@ -388,18 +390,47 @@ impl JupyterClient {
             .base_url
             .replace("http://", "ws://")
             .replace("https://", "wss://");
-        if let Some(sid) = session_id {
+        let token = match &self.auth { ServerAuth::Token(token) => Some(token), ServerAuth::Cookie { .. } => None };
+        if let (Some(sid), Some(token)) = (session_id, token) {
             format!(
                 "{}/api/kernels/{}/channels?session_id={}&token={}",
-                ws_base, kernel_id, sid, self.token
+                ws_base, kernel_id, sid, token
             )
-        } else {
+        } else if let Some(token) = token {
             format!(
                 "{}/api/kernels/{}/channels?token={}",
-                ws_base, kernel_id, self.token
+                ws_base, kernel_id, token
             )
+        } else if let Some(sid) = session_id {
+            format!("{}/api/kernels/{}/channels?session_id={}", ws_base, kernel_id, sid)
+        } else {
+            format!("{}/api/kernels/{}/channels", ws_base, kernel_id)
         }
     }
+}
+
+async fn login_with_password(client: &reqwest::Client, base_url: &str, password: &str) -> Result<ServerAuth> {
+    let login_url = format!("{base_url}/login");
+    let first = client.get(&login_url).send().await.context("Failed to load Jupyter login page")?;
+    let xsrf = cookie_value(first.headers(), "_xsrf").context("Jupyter login did not return an _xsrf cookie")?;
+    let xsrf_cookie = format!("_xsrf={xsrf}");
+    let second = client.post(&login_url)
+        .header(COOKIE, &xsrf_cookie)
+        .form(&[("_xsrf", xsrf.as_str()), ("password", password), ("next", "/tree")])
+        .send().await.context("Failed to submit Jupyter password")?;
+    if !second.status().is_redirection() { anyhow::bail!("Jupyter password login failed: HTTP {}", second.status()); }
+    let session = cookie_pairs(second.headers()).find(|pair| !pair.starts_with("_xsrf="))
+        .context("Jupyter password login did not return a session cookie")?;
+    Ok(ServerAuth::Cookie { header: format!("{xsrf_cookie}; {session}"), xsrf })
+}
+
+fn cookie_pairs<'a>(headers: &'a reqwest::header::HeaderMap) -> impl Iterator<Item = String> + 'a {
+    headers.get_all(SET_COOKIE).iter().filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next()).map(str::to_string)
+}
+
+fn cookie_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    cookie_pairs(headers).find_map(|pair| pair.strip_prefix(&format!("{name}=")).map(str::to_string))
 }
 
 fn filename_from_path(notebook_path: &str) -> String {

@@ -53,7 +53,7 @@ pub async fn read_notebook_remote(
     token: &str,
     server_path: &str,
 ) -> Result<nbformat::v4::Notebook> {
-    let client = JupyterClient::new(server_url.to_string(), token.to_string())?;
+    let client = JupyterClient::new(server_url.to_string(), token.to_string()).await?;
     client
         .get_notebook(server_path)
         .await
@@ -78,7 +78,7 @@ where
     let server_root = resolve_server_root();
     let notebook_server_path = notebook_path_for_server(&file_path, server_root.as_deref());
 
-    let client = JupyterClient::new(server_url, token)?;
+    let client = JupyterClient::new(server_url, token).await?;
     let mut notebook = client
         .get_notebook(&notebook_server_path)
         .await

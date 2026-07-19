@@ -92,7 +92,7 @@ fn validate_connection(conn: &crate::config::JupyterConnection) -> Result<()> {
 
     println!("Validating connection to {}", conn.server_url);
     let result = runtime.block_on(async {
-        let client = JupyterClient::new(conn.server_url.clone(), conn.token.clone())?;
+        let client = JupyterClient::new(conn.server_url.clone(), conn.token.clone()).await?;
         client.test_connection().await
     });
 

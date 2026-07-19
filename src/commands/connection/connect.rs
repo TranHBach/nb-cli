@@ -15,6 +15,10 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Environment variable containing a Jupyter password (never saved)
+    #[arg(long, value_name = "NAME", conflicts_with = "token", requires = "server")]
+    pub password_env: Option<String>,
+
     /// Skip validation checks
     #[arg(long)]
     pub skip_validation: bool,
@@ -54,8 +58,13 @@ pub fn execute(args: ConnectArgs) -> Result<()> {
 
 async fn execute_async(args: ConnectArgs) -> Result<()> {
     // Manual connection mode
-    if let (Some(server_url), Some(token)) = (args.server, args.token) {
-        return connect_manual(server_url, token, args.skip_validation).await;
+    if let Some(server_url) = args.server {
+        let credential = match (args.token, args.password_env) {
+            (Some(token), None) => token,
+            (None, Some(name)) => format!("password-env:{name}"),
+            _ => bail!("Specify exactly one of --token or --password-env with --server"),
+        };
+        return connect_manual(server_url, credential, args.skip_validation).await;
     }
 
     // Create environment configuration
@@ -188,7 +197,7 @@ async fn execute_async(args: ConnectArgs) -> Result<()> {
 }
 
 async fn connect_manual(server_url: String, token: String, skip_validation: bool) -> Result<()> {
-    let client = JupyterClient::new(server_url.clone(), token.clone())?;
+    let client = JupyterClient::new(server_url.clone(), token.clone()).await?;
 
     // Validate connection if requested
     if !skip_validation {
@@ -317,7 +326,7 @@ async fn detect_jupyter_servers(env_config: &EnvConfig) -> Result<Vec<DetectedSe
 }
 
 async fn validate_server(server_url: &str, token: &str) -> bool {
-    match JupyterClient::new(server_url.to_string(), token.to_string()) {
+    match JupyterClient::new(server_url.to_string(), token.to_string()).await {
         Ok(client) => client.test_connection().await.is_ok(),
         Err(_) => false,
     }

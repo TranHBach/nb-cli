@@ -56,9 +56,10 @@ impl RemoteExecutor {
             .as_ref()
             .context("Jupyter session not available")?;
         let ws_url = client.get_ws_url(&session.kernel.id, Some(&session.id));
-        let ws = KernelWebSocket::connect(&ws_url)
-            .await
-            .context("Failed to reconnect to kernel WebSocket")?;
+        let ws = match client.websocket_cookie() {
+            Some(cookie) => KernelWebSocket::connect_with_cookie(&ws_url, cookie).await,
+            None => KernelWebSocket::connect(&ws_url).await,
+        }.context("Failed to reconnect to kernel WebSocket")?;
         self.ws = Some(ws);
         Ok(())
     }
@@ -68,7 +69,7 @@ impl RemoteExecutor {
 impl ExecutionBackend for RemoteExecutor {
     async fn start(&mut self) -> Result<()> {
         // Create HTTP client
-        let client = JupyterClient::new(self.server_url.clone(), self.token.clone())?;
+        let client = JupyterClient::new(self.server_url.clone(), self.token.clone()).await?;
 
         // Test connection
         client
@@ -132,9 +133,10 @@ impl ExecutionBackend for RemoteExecutor {
 
         // Connect to kernel via WebSocket with session_id
         let ws_url = client.get_ws_url(&session.kernel.id, Some(&session.id));
-        let ws = KernelWebSocket::connect(&ws_url)
-            .await
-            .context("Failed to connect to kernel WebSocket")?;
+        let ws = match client.websocket_cookie() {
+            Some(cookie) => KernelWebSocket::connect_with_cookie(&ws_url, cookie).await,
+            None => KernelWebSocket::connect(&ws_url).await,
+        }.context("Failed to connect to kernel WebSocket")?;
 
         self.client = Some(client);
         self.session = Some(session);
@@ -146,7 +148,7 @@ impl ExecutionBackend for RemoteExecutor {
         // kernel-WS path on the definitive backend-absent signal. Transient
         // errors stay hard so a flaky collaboration server is never silently
         // downgraded.
-        if self.config.ydoc_available != Some(false) {
+        if self.config.ydoc_available != Some(false) && !self.token.starts_with("password-env:") {
             if let Some(ref notebook_path) = self.config.notebook_path {
                 match YDocClient::connect(
                     self.server_url.clone(),
