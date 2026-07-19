@@ -120,7 +120,12 @@ pub async fn run_mutation<M: CellMutator>(
             server_path,
             cached_ydoc_available,
         } => {
-            if cached_ydoc_available == Some(false) {
+            // Password-authenticated Jupyter servers cannot use the Y.js
+            // probe: that path only accepts token-authenticated requests and
+            // would turn a normal Contents-API edit into a misleading 403.
+            // The HTTP Contents client already handles password login and
+            // XSRF cookies, so route these mutations directly through it.
+            if token.starts_with("password-env:") || cached_ydoc_available == Some(false) {
                 let result = run_via_contents_api(&file_path, &server_url, &token, mutator).await?;
                 return Ok((file_path, result));
             }

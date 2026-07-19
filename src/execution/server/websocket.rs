@@ -57,12 +57,30 @@ impl KernelWebSocket {
 
     /// Connect to a password-authenticated Jupyter kernel with its session cookie.
     pub async fn connect_with_cookie(ws_url: &str, cookie: &str) -> Result<Self> {
-        let mut request = ws_url.into_client_request().context("Invalid WebSocket URL")?;
-        request.headers_mut().insert("Cookie", cookie.parse().context("Invalid cookie header")?);
-        request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("v1.kernel.websocket.jupyter.org"));
-        let (ws_stream, response) = tokio_tungstenite::connect_async(request).await.context("Failed to connect to kernel WebSocket")?;
-        let accepted = response.headers().get(SEC_WEBSOCKET_PROTOCOL).and_then(|v| v.to_str().ok()).unwrap_or("");
-        if accepted != "v1.kernel.websocket.jupyter.org" { anyhow::bail!("Server does not support WebSocket v1 kernel protocol (got {:?})", accepted); }
+        let mut request = ws_url
+            .into_client_request()
+            .context("Invalid WebSocket URL")?;
+        request
+            .headers_mut()
+            .insert("Cookie", cookie.parse().context("Invalid cookie header")?);
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("v1.kernel.websocket.jupyter.org"),
+        );
+        let (ws_stream, response) = tokio_tungstenite::connect_async(request)
+            .await
+            .context("Failed to connect to kernel WebSocket")?;
+        let accepted = response
+            .headers()
+            .get(SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if accepted != "v1.kernel.websocket.jupyter.org" {
+            anyhow::bail!(
+                "Server does not support WebSocket v1 kernel protocol (got {:?})",
+                accepted
+            );
+        }
         let (write, read) = ws_stream.split();
         Ok(Self { write, read })
     }

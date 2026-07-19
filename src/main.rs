@@ -25,6 +25,8 @@ enum Commands {
     View(commands::view::ViewArgs),
     /// Execute cells in a notebook
     Execute(commands::execute_notebook::ExecuteNotebookArgs),
+    /// Run a shell command in a remote Jupyter terminal
+    Terminal(commands::terminal::TerminalArgs),
     /// Search for text and errors in notebook cells
     Search(commands::search::SearchArgs),
     /// Add, update or delete cells
@@ -77,6 +79,7 @@ fn main() {
         Commands::Read(args) => commands::read::execute(args),
         Commands::View(args) => commands::view::execute(args),
         Commands::Execute(args) => commands::execute_notebook::execute(args),
+        Commands::Terminal(args) => commands::terminal::execute(args),
         Commands::Search(args) => commands::search::execute(args),
         Commands::Cell { command } => match command {
             CellCommands::Add(args) => commands::cell::add::execute(args),

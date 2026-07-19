@@ -16,7 +16,12 @@ pub struct ConnectArgs {
     pub token: Option<String>,
 
     /// Environment variable containing a Jupyter password (never saved)
-    #[arg(long, value_name = "NAME", conflicts_with = "token", requires = "server")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "token",
+        requires = "server"
+    )]
     pub password_env: Option<String>,
 
     /// Skip validation checks

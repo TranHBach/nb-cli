@@ -22,6 +22,7 @@ Use `nb` for every `.ipynb` operation. Do not read, write, patch, or edit notebo
 - If a `uv` environment is not present, the dependency cell should use `%pip install ...`.
 - Run `nb <command> --help` or `nb cell <subcommand> --help` when command syntax is uncertain.
 - In connected mode, let `nb` use the saved connection from `nb connect`. Do not write secret tokens into commands, prompts, logs, or examples; if auto-detection is unavailable, ask the user to establish the connection manually.
+- Password-authenticated servers are routed through the authenticated Contents API for notebook mutations; do not force the Y.js path, which requires token-authenticated collaboration endpoints.
 - Before running non-notebook Python commands that should match the active notebook environment, use `nb status --python` and run commands through the returned prefix.
 
 ## Trust Boundary

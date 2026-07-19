@@ -3,6 +3,7 @@ pub mod common;
 pub mod connection;
 pub mod create_notebook;
 pub mod execute_notebook;
+pub mod terminal;
 pub mod output;
 pub mod read;
 pub mod search;

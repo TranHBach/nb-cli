@@ -52,6 +52,23 @@ struct KernelSpec {
 }
 
 impl JupyterClient {
+    pub async fn create_terminal(&self, name: &str) -> Result<()> {
+        let url = format!("{}/api/terminals", self.base_url);
+        let response = self.authenticated(self.client.post(&url)).json(&serde_json::json!({"name": name})).send().await?;
+        if !response.status().is_success() { anyhow::bail!("Failed to create terminal: HTTP {}", response.status()); }
+        Ok(())
+    }
+
+    pub async fn delete_terminal(&self, name: &str) -> Result<()> {
+        let url = format!("{}/api/terminals/{}", self.base_url, name);
+        let response = self.authenticated(self.client.delete(&url)).send().await?;
+        if !response.status().is_success() { anyhow::bail!("Failed to delete terminal: HTTP {}", response.status()); }
+        Ok(())
+    }
+
+    pub fn get_terminal_ws_url(&self, name: &str) -> String {
+        self.base_url.replace("http://", "ws://").replace("https://", "wss://") + &format!("/terminals/websocket/{}", name)
+    }
     /// Create a new Jupyter Server client
     pub async fn new(server_url: String, credential: String) -> Result<Self> {
         let client = reqwest::Client::builder()
@@ -77,12 +94,17 @@ impl JupyterClient {
     fn authenticated(&self, request: RequestBuilder) -> RequestBuilder {
         match &self.auth {
             ServerAuth::Token(token) => request.query(&[("token", token)]),
-            ServerAuth::Cookie { header, xsrf } => request.header(COOKIE, header).header("X-XSRFToken", xsrf),
+            ServerAuth::Cookie { header, xsrf } => {
+                request.header(COOKIE, header).header("X-XSRFToken", xsrf)
+            }
         }
     }
 
     pub fn websocket_cookie(&self) -> Option<&str> {
-        match &self.auth { ServerAuth::Token(_) => None, ServerAuth::Cookie { header, .. } => Some(header) }
+        match &self.auth {
+            ServerAuth::Token(_) => None,
+            ServerAuth::Cookie { header, .. } => Some(header),
+        }
     }
 
     /// Test connection to the server
@@ -327,6 +349,53 @@ impl JupyterClient {
         Ok(url.to_string())
     }
 
+    /// Create all missing directories in a Contents API path.
+    pub async fn ensure_directory_tree(&self, path: &str) -> Result<()> {
+        let mut current = String::new();
+        for part in path.split('/').filter(|part| !part.is_empty() && *part != ".") {
+            if !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(part);
+
+            let url = self.contents_url(&current)?;
+            let existing = self
+                .authenticated(self.client.get(&url))
+                .query(&[("content", "0"), ("type", "directory")])
+                .send()
+                .await
+                .context("Failed to check remote directory")?;
+            if existing.status().is_success() {
+                continue;
+            }
+            if existing.status() != reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!(
+                    "Failed to check remote directory '{}': HTTP {}",
+                    current,
+                    existing.status()
+                );
+            }
+
+            let response = self
+                .authenticated(self.client.put(&url))
+                .json(&serde_json::json!({"type": "directory"}))
+                .send()
+                .await
+                .context("Failed to create remote directory")?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!(
+                    "Failed to create remote directory '{}': HTTP {} - {}",
+                    current,
+                    status,
+                    text
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Read a notebook from the server via the Contents API.
     pub async fn get_notebook(&self, path: &str) -> Result<nbformat::v4::Notebook> {
         let url = self.contents_url(path)?;
@@ -390,7 +459,10 @@ impl JupyterClient {
             .base_url
             .replace("http://", "ws://")
             .replace("https://", "wss://");
-        let token = match &self.auth { ServerAuth::Token(token) => Some(token), ServerAuth::Cookie { .. } => None };
+        let token = match &self.auth {
+            ServerAuth::Token(token) => Some(token),
+            ServerAuth::Cookie { .. } => None,
+        };
         if let (Some(sid), Some(token)) = (session_id, token) {
             format!(
                 "{}/api/kernels/{}/channels?session_id={}&token={}",
@@ -402,35 +474,65 @@ impl JupyterClient {
                 ws_base, kernel_id, token
             )
         } else if let Some(sid) = session_id {
-            format!("{}/api/kernels/{}/channels?session_id={}", ws_base, kernel_id, sid)
+            format!(
+                "{}/api/kernels/{}/channels?session_id={}",
+                ws_base, kernel_id, sid
+            )
         } else {
             format!("{}/api/kernels/{}/channels", ws_base, kernel_id)
         }
     }
 }
 
-async fn login_with_password(client: &reqwest::Client, base_url: &str, password: &str) -> Result<ServerAuth> {
+async fn login_with_password(
+    client: &reqwest::Client,
+    base_url: &str,
+    password: &str,
+) -> Result<ServerAuth> {
     let login_url = format!("{base_url}/login");
-    let first = client.get(&login_url).send().await.context("Failed to load Jupyter login page")?;
-    let xsrf = cookie_value(first.headers(), "_xsrf").context("Jupyter login did not return an _xsrf cookie")?;
+    let first = client
+        .get(&login_url)
+        .send()
+        .await
+        .context("Failed to load Jupyter login page")?;
+    let xsrf = cookie_value(first.headers(), "_xsrf")
+        .context("Jupyter login did not return an _xsrf cookie")?;
     let xsrf_cookie = format!("_xsrf={xsrf}");
-    let second = client.post(&login_url)
+    let second = client
+        .post(&login_url)
         .header(COOKIE, &xsrf_cookie)
-        .form(&[("_xsrf", xsrf.as_str()), ("password", password), ("next", "/tree")])
-        .send().await.context("Failed to submit Jupyter password")?;
-    if !second.status().is_redirection() { anyhow::bail!("Jupyter password login failed: HTTP {}", second.status()); }
-    let session = cookie_pairs(second.headers()).find(|pair| !pair.starts_with("_xsrf="))
+        .form(&[
+            ("_xsrf", xsrf.as_str()),
+            ("password", password),
+            ("next", "/tree"),
+        ])
+        .send()
+        .await
+        .context("Failed to submit Jupyter password")?;
+    if !second.status().is_redirection() {
+        anyhow::bail!("Jupyter password login failed: HTTP {}", second.status());
+    }
+    let session = cookie_pairs(second.headers())
+        .find(|pair| !pair.starts_with("_xsrf="))
         .context("Jupyter password login did not return a session cookie")?;
-    Ok(ServerAuth::Cookie { header: format!("{xsrf_cookie}; {session}"), xsrf })
+    Ok(ServerAuth::Cookie {
+        header: format!("{xsrf_cookie}; {session}"),
+        xsrf,
+    })
 }
 
 fn cookie_pairs<'a>(headers: &'a reqwest::header::HeaderMap) -> impl Iterator<Item = String> + 'a {
-    headers.get_all(SET_COOKIE).iter().filter_map(|value| value.to_str().ok())
-        .filter_map(|value| value.split(';').next()).map(str::to_string)
+    headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next())
+        .map(str::to_string)
 }
 
 fn cookie_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
-    cookie_pairs(headers).find_map(|pair| pair.strip_prefix(&format!("{name}=")).map(str::to_string))
+    cookie_pairs(headers)
+        .find_map(|pair| pair.strip_prefix(&format!("{name}=")).map(str::to_string))
 }
 
 fn filename_from_path(notebook_path: &str) -> String {
@@ -445,13 +547,15 @@ fn filename_from_path(notebook_path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn client(base_url: &str) -> JupyterClient {
-        JupyterClient::new(base_url.to_string(), "tok".to_string()).unwrap()
+    async fn client(base_url: &str) -> JupyterClient {
+        JupyterClient::new(base_url.to_string(), "tok".to_string())
+            .await
+            .unwrap()
     }
 
-    #[test]
-    fn test_get_ws_url_formats() {
-        let c = client("http://127.0.0.1:8888");
+    #[tokio::test]
+    async fn test_get_ws_url_formats() {
+        let c = client("http://127.0.0.1:8888").await;
 
         let url = c.get_ws_url("kid1", None);
         assert_eq!(
@@ -465,14 +569,14 @@ mod tests {
             "ws://127.0.0.1:8888/api/kernels/kid2/channels?session_id=sid42&token=tok"
         );
 
-        let c_https = client("https://example.com");
+        let c_https = client("https://example.com").await;
         let url = c_https.get_ws_url("kid3", None);
         assert!(url.starts_with("wss://"), "https must become wss");
     }
 
-    #[test]
-    fn test_new_trims_trailing_slash() {
-        let c = client("http://host:8888/");
+    #[tokio::test]
+    async fn test_new_trims_trailing_slash() {
+        let c = client("http://host:8888/").await;
         let url = c.get_ws_url("k", None);
         assert!(
             !url.contains("//api"),

@@ -59,7 +59,8 @@ impl RemoteExecutor {
         let ws = match client.websocket_cookie() {
             Some(cookie) => KernelWebSocket::connect_with_cookie(&ws_url, cookie).await,
             None => KernelWebSocket::connect(&ws_url).await,
-        }.context("Failed to reconnect to kernel WebSocket")?;
+        }
+        .context("Failed to reconnect to kernel WebSocket")?;
         self.ws = Some(ws);
         Ok(())
     }
@@ -136,7 +137,8 @@ impl ExecutionBackend for RemoteExecutor {
         let ws = match client.websocket_cookie() {
             Some(cookie) => KernelWebSocket::connect_with_cookie(&ws_url, cookie).await,
             None => KernelWebSocket::connect(&ws_url).await,
-        }.context("Failed to connect to kernel WebSocket")?;
+        }
+        .context("Failed to connect to kernel WebSocket")?;
 
         self.client = Some(client);
         self.session = Some(session);

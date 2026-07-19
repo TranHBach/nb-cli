@@ -358,7 +358,8 @@ async fn execute_async(args: ExecuteNotebookArgs) -> Result<()> {
                 let client = crate::execution::server::client::JupyterClient::new(
                     server_url.clone(),
                     token.clone(),
-                ).await?;
+                )
+                .await?;
                 let save_path = server_path.as_deref().expect("set for Remote mode");
                 client
                     .save_notebook(save_path, &notebook)

@@ -78,19 +78,29 @@ pub fn execute(args: CreateArgs) -> Result<()> {
         bail!("File '{}' already exists. Use --force to overwrite.", path);
     }
 
-    // Create parent directories if they don't exist
-    if let Some(parent) = path_obj.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .context(format!("Failed to create directory '{}'", parent.display()))?;
+    // Resolve the destination before building notebook metadata. Remote creation
+    // must not require a matching local kernelspec.
+    let mode = common::resolve_execution_mode(None, None)?;
+    let remote = matches!(
+        &mode,
+        crate::execution::types::ExecutionMode::Remote { .. }
+    );
+
+    // Create parent directories only for local files. The Contents API creates
+    // remote parent directories as part of the notebook PUT request.
+    if !remote {
+        if let Some(parent) = path_obj.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .context(format!("Failed to create directory '{}'", parent.display()))?;
+            }
         }
     }
 
     // Create notebook with specified kernel
-    let notebook = create_notebook(&args)?;
+    let notebook = create_notebook(&args, remote)?;
 
     // Write notebook to appropriate destination
-    let mode = common::resolve_execution_mode(None, None)?;
     match &mode {
         crate::execution::types::ExecutionMode::Remote { server_url, token } => {
             let server_root = crate::notebook::remote::resolve_server_root();
@@ -103,6 +113,12 @@ pub fn execute(args: CreateArgs) -> Result<()> {
                 server_url.clone(),
                 token.clone(),
             ))?;
+            if let Some(parent) = Path::new(&server_path).parent() {
+                let parent_path = parent.to_string_lossy();
+                if !parent_path.is_empty() && parent_path != "." {
+                    runtime.block_on(client.ensure_directory_tree(&parent_path))?;
+                }
+            }
             runtime
                 .block_on(client.save_notebook(&server_path, &notebook))
                 .context("Failed to create notebook on server")?;
@@ -131,39 +147,51 @@ pub fn execute(args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
-fn create_notebook(args: &CreateArgs) -> Result<Notebook> {
-    // Create environment configuration if using uv/pixi
-    let env_config = if args.uv || args.pixi {
-        Some(EnvConfig::from_flags(args.uv, args.pixi)?)
+fn create_notebook(args: &CreateArgs, remote: bool) -> Result<Notebook> {
+    let kernelspec = if remote {
+        // The server, not this machine, owns the executable kernelspec. Keep the
+        // requested kernel name in notebook metadata and let remote execution
+        // resolve it there.
+        KernelSpec {
+            name: args.kernel.clone(),
+            display_name: args.kernel.clone(),
+            language: Some("python".to_string()),
+            additional: HashMap::new(),
+        }
     } else {
-        None
-    };
+        // Create environment configuration if using uv/pixi
+        let env_config = if args.uv || args.pixi {
+            Some(EnvConfig::from_flags(args.uv, args.pixi)?)
+        } else {
+            None
+        };
 
-    // Find and validate the kernel exists
-    let (kernel_name, kernel_spec_path) = find_kernel(
-        Some(&args.kernel),
-        None,
-        env_config.as_ref(),
-        Some("create"),
-    )?;
+        // Find and validate the kernel exists locally.
+        let (kernel_name, kernel_spec_path) = find_kernel(
+            Some(&args.kernel),
+            None,
+            env_config.as_ref(),
+            Some("create"),
+        )?;
 
-    // Read kernel.json from the kernelspec directory
-    let kernel_json_path = kernel_spec_path.join("kernel.json");
-    let content = std::fs::read_to_string(&kernel_json_path).context(format!(
-        "Failed to read kernel spec from {}",
-        kernel_json_path.display()
-    ))?;
+        // Read kernel.json from the kernelspec directory.
+        let kernel_json_path = kernel_spec_path.join("kernel.json");
+        let content = std::fs::read_to_string(&kernel_json_path).context(format!(
+            "Failed to read kernel spec from {}",
+            kernel_json_path.display()
+        ))?;
 
-    // Parse the kernelspec
-    let spec = serde_json::from_str::<jupyter_protocol::JupyterKernelspec>(&content)
-        .context("Failed to parse kernel.json")?;
+        // Parse the kernelspec.
+        let spec = serde_json::from_str::<jupyter_protocol::JupyterKernelspec>(&content)
+            .context("Failed to parse kernel.json")?;
 
-    // Use the actual kernel metadata
-    let kernelspec = KernelSpec {
-        name: kernel_name,
-        display_name: spec.display_name,
-        language: Some(spec.language),
-        additional: HashMap::new(),
+        // Use the actual local kernel metadata.
+        KernelSpec {
+            name: kernel_name,
+            display_name: spec.display_name,
+            language: Some(spec.language),
+            additional: HashMap::new(),
+        }
     };
 
     // Create metadata

@@ -1,6 +1,8 @@
 # Creating Notebooks
 
-Use `nb create` to create new `.ipynb` files instead of writing notebook JSON.
+Use `nb create` to create new `.ipynb` files instead of writing notebook JSON. In
+connected remote mode it writes through the server Contents API, so the local
+machine does not need the requested kernel installed.
 
 ## Basic Creation
 
@@ -18,7 +20,9 @@ nb create notebook.ipynb --kernel python3
 nb create notebook.ipynb -k python3
 ```
 
-The default kernel is `python3`. `nb` validates kernel availability and writes kernelspec metadata.
+The default kernel is `python3`. In local mode `nb` validates kernel availability
+and writes the discovered kernelspec metadata. In connected remote mode it writes
+the requested kernel name and lets the remote server resolve its kernelspec.
 
 ## Markdown Initial Cell
 
