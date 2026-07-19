@@ -42,14 +42,25 @@ async fn run_terminal(client: &JupyterClient, name: &str, command: &str) -> Resu
     let mut req = ws_url.into_client_request().context("Invalid terminal WebSocket URL")?;
     if let Some(cookie) = client.websocket_cookie() { req.headers_mut().insert("Cookie", cookie.parse()?); }
     let (mut ws, _) = connect_async(req).await.context("Failed to connect to Jupyter terminal WebSocket")?;
-    ws.send(Message::Text(serde_json::to_string(&["stdin", &format!("{}; printf '\\n{}%s\\n' \"$?\"\r", command, marker)])?.into())).await?;
+        ws.send(Message::Text(serde_json::to_string(&["stdin", &format!("{}; printf '\\n{}%s\\n' \"$?\"\n", command, marker)])?.into())).await?;
+    let mut transcript = String::new();
     while let Some(message) = ws.next().await {
         let text = match message? { Message::Text(text) => text, _ => continue };
         let pair: Vec<Value> = serde_json::from_str(&text).context("Invalid terminal WebSocket message")?;
         if pair.len() != 2 { continue; }
         let output = pair[1].as_str().unwrap_or("");
-        if let Some(pos) = output.rfind(&marker) { print!("{}", &output[..pos]); break; }
-        print!("{}", output);
+        transcript.push_str(output);
+        let first = transcript.find(&marker);
+        let second = first.and_then(|pos| transcript[pos + marker.len()..].find(&marker).map(|next| pos + marker.len() + next));
+        if let (Some(first), Some(second)) = (first, second) {
+            let echoed_tail = &transcript[first + marker.len()..second];
+            let command_output = echoed_tail.find('\n').map(|pos| &echoed_tail[pos + 1..]).unwrap_or("");
+            print!("{}", command_output);
+            let status_text = &transcript[second + marker.len()..];
+            let status = status_text.lines().next().unwrap_or("0").trim().parse::<i32>().unwrap_or(1);
+            if status != 0 { anyhow::bail!("remote command exited with status {status}"); }
+            break;
+        }
     }
     Ok(())
 }
